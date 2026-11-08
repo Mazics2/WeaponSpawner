@@ -25,14 +25,14 @@ public class SpawnerManager
     /// <summary>Spawner Id -> dunyadaki model entity'si.</summary>
     private readonly Dictionary<int, CHandle<CBaseModelEntity>> _props = new();
 
+    /// <summary>Spawner Id -> dunyadaki 3D yazi entity'si.</summary>
+    private readonly Dictionary<int, CHandle<CPointWorldText>> _texts = new();
+
     /// <summary>Spawner Id -> su an alanin icinde olan oyuncu slotlari (kenar tetikleme icin).</summary>
     private readonly Dictionary<int, HashSet<int>> _inside = new();
 
     /// <summary>(spawnerId, slot) -> son alma zamani.</summary>
     private readonly Dictionary<(int, int), float> _lastPickup = new();
-
-    /// <summary>Tabloda olmayan silahlar icin calisma zamaninda bulunan modeller.</summary>
-    private readonly Dictionary<string, string> _modelCache = new(StringComparer.OrdinalIgnoreCase);
 
     private int _tick;
 
@@ -50,29 +50,7 @@ public class SpawnerManager
     public string? ResolveModel(string weapon)
     {
         if (_config.ModelOverrides.TryGetValue(weapon, out var ov) && !string.IsNullOrWhiteSpace(ov)) return ov;
-        var known = WeaponCatalog.GetModel(weapon);
-        if (known != null) return known;
-        if (_modelCache.TryGetValue(weapon, out var cached)) return cached;
-
-        // Son care: gecici bir silah entity'si olusturup modelini oku.
-        try
-        {
-            var temp = _core.EntitySystem.CreateEntityByDesignerName<CBasePlayerWeapon>(weapon);
-            if (temp == null || !temp.IsValid) return null;
-            temp.DispatchSpawn();
-            var model = temp.GetModel();
-            temp.Despawn();
-            if (!string.IsNullOrWhiteSpace(model))
-            {
-                _modelCache[weapon] = model;
-                return model;
-            }
-        }
-        catch (Exception ex)
-        {
-            _core.Logger.LogWarning($"[WeaponSpawner] '{weapon}' modeli bulunamadi: {ex.Message}");
-        }
-        return null;
+        return WeaponCatalog.GetModel(weapon);
     }
 
     /// <summary>Precache icin bilinen tum model yollari.</summary>
@@ -91,148 +69,145 @@ public class SpawnerManager
         return set;
     }
 
-    private bool IsPropAlive(int id, out CBaseModelEntity? prop)
-    {
-        prop = null;
-        if (!_props.TryGetValue(id, out var handle)) return false;
-        try
-        {
-            if (!handle.IsValid) return false;
-            prop = handle.Value;
-            return prop != null && prop.IsValid;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
     public void SpawnAll()
     {
         foreach (var s in _store.Spawners) Spawn(s);
     }
 
-    /// <summary>Spawner modelini (yeniden) olusturur.</summary>
+    /// <summary>Spawner modelini ve 3D yazisini olusturur.</summary>
     public bool Spawn(SpawnerData data)
     {
         Despawn(data.Id);
 
+        var origin = ToVector(data.Origin);
+        var angles = new QAngle(data.Angles[0], data.RuntimeYaw, data.Angles[2]);
         var model = ResolveModel(data.Weapon);
-        if (string.IsNullOrWhiteSpace(model))
+
+        // 1. Model (prop_physics) olustur
+        if (!string.IsNullOrWhiteSpace(model))
         {
-            _core.Logger.LogWarning($"[WeaponSpawner] #{data.Id} ({data.Weapon}) icin model yok, olusturulamadi.");
-            return false;
+            try
+            {
+                var prop = _core.EntitySystem.CreateEntityByDesignerName<CPhysicsProp>("prop_physics")
+                           ?? _core.EntitySystem.CreateEntityByDesignerName<CBaseModelEntity>("prop_physics");
+
+                if (prop != null && prop.IsValid)
+                {
+                    // ONEMLI: DispatchSpawn oncesi asla SetModel() cagrilmaz! Aksi halde Source 2 motoru
+                    // EF_IN_STAGING_LIST assertion hatasi verir. Model keyvalues uzerinden verilir.
+                    using (var kv = new CEntityKeyValues())
+                    {
+                        kv.SetString("model", model);
+                        kv.SetString("targetname", $"weaponspawner_{data.Id}");
+                        kv.SetInt32("spawnflags", 8);          // 8 = Motion Disabled (yercekimsiz / havada donuk)
+                        kv.SetBool("motiondisabled", true);
+                        kv.SetInt32("solid", 0);               // Carpisma yok; oyuncu icinden gecer
+                        kv.SetInt32("CollisionGroup", (int)CollisionGroup.Debris);
+                        kv.SetBool("disableshadows", true);
+                        kv.SetVector("origin", origin);
+                        kv.SetQAngle("angles", angles);
+                        prop.DispatchSpawn(kv);
+                    }
+
+                    prop.Teleport(origin, angles, new Vector(0f, 0f, 0f));
+                    prop.AcceptInput("DisableMotion", "", null, null, 0);
+                    prop.AcceptInput("DisableCollision", "", null, null, 0);
+                    ApplyNonSolid(prop);
+
+                    if (MathF.Abs(data.Scale - 1f) > 0.001f)
+                    {
+                        try { prop.SetScale(data.Scale); } catch { }
+                    }
+
+                    var propHandle = _core.EntitySystem.GetRefEHandle(prop);
+                    _core.Scheduler.NextTick(() =>
+                    {
+                        try
+                        {
+                            if (propHandle.IsValid && propHandle.Value is { } p && p.IsValid)
+                            {
+                                p.AcceptInput("DisableCollision", "", null, null, 0);
+                                ApplyNonSolid(p);
+                            }
+                        }
+                        catch { }
+                    });
+
+                    _props[data.Id] = propHandle;
+                }
+            }
+            catch (Exception ex)
+            {
+                _core.Logger.LogDebug($"[WeaponSpawner] #{data.Id} model olusturulamadi: {ex.Message}");
+            }
         }
 
+        // 2. Havada 3D Yazi (point_worldtext) olustur: [ AWP ]
         try
         {
-            // CS2'de silah modelleri 'propdata' icerir; Source 2 motoru bu modellerin prop_dynamic veya
-            // prop_dynamic_override ile olusturulmasini kesinlikle yasaklar ve entity'yi SetupModel() sirasinda siler
-            // ("has propdata which means that it be used on a prop_physics. DELETED").
-            // Bu yuzden dogrudan 'prop_physics' entity'si olusturulur ve spawnflags=8 (Motion Disabled)
-            // ile havada asili, hareketsiz ve yercekimsiz olarak dondurulur.
-            CBaseModelEntity? prop = _core.EntitySystem.CreateEntityByDesignerName<CPhysicsProp>("prop_physics");
-            if (prop == null || !prop.IsValid)
+            var text = _core.EntitySystem.CreateEntityByDesignerName<CPointWorldText>("point_worldtext");
+            if (text != null && text.IsValid)
             {
-                prop = _core.EntitySystem.CreateEntityByDesignerName<CBaseModelEntity>("prop_physics");
+                text.MessageText = $"[ {Pretty(data.Weapon)} ]";
+                text.FontSize = 26f;
+                text.WorldUnitsPerPx = 0.22f;
+                text.Color = Color.FromHex("#FFD700"); // Altin sarisi
+                text.Enabled = true;
+                text.Fullbright = true;
+                text.DispatchSpawn();
+
+                var textPos = new Vector(origin.X, origin.Y, origin.Z + 20f);
+                text.Teleport(textPos, angles, new Vector(0f, 0f, 0f));
+
+                _texts[data.Id] = _core.EntitySystem.GetRefEHandle(text);
             }
-            if (prop == null || !prop.IsValid) return false;
-
-            var origin = ToVector(data.Origin);
-            var angles = new QAngle(data.Angles[0], data.RuntimeYaw, data.Angles[2]);
-
-            // DispatchSpawn oncesi modeli ve konumu hazirla
-            try { prop.SetModel(model); } catch { }
-            try { prop.Teleport(origin, angles, new Vector(0f, 0f, 0f)); } catch { }
-
-            using (var kv = new CEntityKeyValues())
-            {
-                kv.SetString("model", model);
-                kv.SetString("targetname", $"weaponspawner_{data.Id}");
-                kv.SetInt32("spawnflags", 8);          // 8 = Motion Disabled (yercekimsiz / havada dondurulmus)
-                kv.SetBool("motiondisabled", true);
-                kv.SetInt32("solid", 0);               // carpisma yok; oyuncu icinden gecer
-                kv.SetInt32("CollisionGroup", (int)CollisionGroup.Debris);
-                kv.SetBool("disableshadows", true);
-                kv.SetVector("origin", origin);
-                kv.SetQAngle("angles", angles);
-                prop.DispatchSpawn(kv);
-            }
-
-            // DispatchSpawn sonrasi modeli, yerlesimi ve carpismayi saglamlastir
-            try { prop.SetModel(model); } catch { }
-            try { prop.Teleport(origin, angles, new Vector(0f, 0f, 0f)); } catch { }
-            try { prop.AcceptInput("DisableMotion", "", null, null, 0); } catch { }
-            try { prop.AcceptInput("DisableCollision", "", null, null, 0); } catch { }
-
-            // Kesinlikle non-solid olmasini sagla (oyuncu icinden hayalet gibi gecsin)
-            ApplyNonSolid(prop);
-
-            // CS2 fizik motoru spawn tick'inde carpisma kutusunu tekrar aktif edebildigi icin
-            // bir sonraki tick'te de carpismayi kesin olarak kapat
-            var propHandle = _core.EntitySystem.GetRefEHandle(prop);
-            _core.Scheduler.NextTick(() =>
-            {
-                try
-                {
-                    if (propHandle.IsValid && propHandle.Value is { } p && p.IsValid)
-                    {
-                        p.AcceptInput("DisableCollision", "", null, null, 0);
-                        ApplyNonSolid(p);
-                    }
-                }
-                catch { }
-            });
-
-            if (MathF.Abs(data.Scale - 1f) > 0.001f)
-            {
-                try { prop.SetScale(data.Scale); } catch { }
-            }
-
-            if (_config.Glow) ApplyGlow(prop);
-
-            _props[data.Id] = propHandle;
-            return true;
         }
         catch (Exception ex)
         {
-            _core.Logger.LogError($"[WeaponSpawner] #{data.Id} olusturulamadi: {ex.Message}");
-            return false;
+            _core.Logger.LogDebug($"[WeaponSpawner] 3D yazi olusturulamadi: {ex.Message}");
         }
+
+        return _props.ContainsKey(data.Id) || _texts.ContainsKey(data.Id);
     }
 
-    private static void ApplyNonSolid(CBaseModelEntity prop)
+    private static void ApplyNonSolid(CBaseEntity prop)
     {
         try
         {
-            prop.Collision.SolidType = SolidType_t.SOLID_NONE;
-            prop.Collision.SolidFlags = 4; // FSOLID_NOT_SOLID
-            prop.Collision.CollisionGroup = (byte)CollisionGroup.Debris;
-            prop.Collision.EnablePhysics = 0;
-            prop.Collision.SolidTypeUpdated();
-            prop.Collision.SolidFlagsUpdated();
-            prop.Collision.CollisionGroupUpdated();
-            prop.Collision.EnablePhysicsUpdated();
+            if (prop.Collision is { } col)
+            {
+                col.SolidType = SolidType_t.SOLID_NONE;
+                col.SolidFlags = 4; // FSOLID_NOT_SOLID
+                col.CollisionGroup = (byte)CollisionGroup.Debris;
+                col.EnablePhysics = 0;
+                col.SolidTypeUpdated();
+                col.SolidFlagsUpdated();
+                col.CollisionGroupUpdated();
+                col.EnablePhysicsUpdated();
+            }
             prop.CollisionRulesChanged();
         }
         catch { }
     }
 
-    private void ApplyGlow(CBaseModelEntity prop)
+    private void ApplyGlow(CBaseEntity prop)
     {
         try
         {
-            var color = Color.FromHex(_config.GlowColor);
-            prop.Glow.GlowColorOverride = color;
-            prop.Glow.GlowColorOverrideUpdated();
-            prop.Glow.GlowRange = _config.GlowRange;
-            prop.Glow.GlowRangeUpdated();
-            prop.Glow.GlowRangeMin = 0;
-            prop.Glow.GlowRangeMinUpdated();
-            prop.Glow.GlowTeam = -1;
-            prop.Glow.GlowTeamUpdated();
-            prop.Glow.GlowType = 3;
-            prop.Glow.GlowTypeUpdated();
+            if (prop is CBaseModelEntity modelEntity)
+            {
+                var color = Color.FromHex(_config.GlowColor);
+                modelEntity.Glow.GlowColorOverride = color;
+                modelEntity.Glow.GlowColorOverrideUpdated();
+                modelEntity.Glow.GlowRange = _config.GlowRange;
+                modelEntity.Glow.GlowRangeUpdated();
+                modelEntity.Glow.GlowRangeMin = 0;
+                modelEntity.Glow.GlowRangeMinUpdated();
+                modelEntity.Glow.GlowTeam = -1;
+                modelEntity.Glow.GlowTeamUpdated();
+                modelEntity.Glow.GlowType = 3;
+                modelEntity.Glow.GlowTypeUpdated();
+            }
         }
         catch (Exception ex)
         {
@@ -240,7 +215,7 @@ public class SpawnerManager
         }
     }
 
-    /// <summary>Sadece dunyadaki modeli kaldirir (oyuncu durum bilgisi korunur).</summary>
+    /// <summary>Sadece dunyadaki modeli ve yaziyi kaldirir (oyuncu durum bilgisi korunur).</summary>
     public void Despawn(int id)
     {
         if (IsPropAlive(id, out var prop))
@@ -248,6 +223,12 @@ public class SpawnerManager
             try { prop!.Despawn(); } catch { }
         }
         _props.Remove(id);
+
+        if (IsTextAlive(id, out var text))
+        {
+            try { text!.Despawn(); } catch { }
+        }
+        _texts.Remove(id);
     }
 
     /// <summary>Spawner tamamen silindiginde model + durum bilgisini temizler.</summary>
@@ -260,8 +241,10 @@ public class SpawnerManager
 
     public void DespawnAll()
     {
-        foreach (var id in _props.Keys.ToList()) Despawn(id);
+        var allIds = _props.Keys.Concat(_texts.Keys).Distinct().ToList();
+        foreach (var id in allIds) Despawn(id);
         _props.Clear();
+        _texts.Clear();
         _inside.Clear();
     }
 
@@ -269,6 +252,7 @@ public class SpawnerManager
     public void ForgetAndRespawn()
     {
         _props.Clear();
+        _texts.Clear();
         _inside.Clear();
         SpawnAll();
     }
@@ -277,19 +261,39 @@ public class SpawnerManager
     public void ApplyTransform(SpawnerData data)
     {
         data.RuntimeYaw = data.Angles[1];
-        if (!IsPropAlive(data.Id, out var prop))
+        var origin = ToVector(data.Origin);
+        var angles = new QAngle(data.Angles[0], data.RuntimeYaw, data.Angles[2]);
+        var textPos = new Vector(origin.X, origin.Y, origin.Z + 20f);
+
+        bool hasProp = IsPropAlive(data.Id, out var prop);
+        bool hasText = IsTextAlive(data.Id, out var text);
+
+        if (!hasProp && !hasText)
         {
             Spawn(data);
             return;
         }
-        try
+
+        if (hasProp && prop != null)
         {
-            prop!.Teleport(ToVector(data.Origin), new QAngle(data.Angles[0], data.RuntimeYaw, data.Angles[2]), new Vector(0f, 0f, 0f));
-            prop.SetScale(data.Scale);
+            try
+            {
+                prop.Teleport(origin, angles, new Vector(0f, 0f, 0f));
+                if (MathF.Abs(data.Scale - 1f) > 0.001f)
+                {
+                    prop.SetScale(data.Scale);
+                }
+            }
+            catch { }
         }
-        catch
+
+        if (hasText && text != null)
         {
-            Spawn(data);
+            try
+            {
+                text.Teleport(textPos, angles, new Vector(0f, 0f, 0f));
+            }
+            catch { }
         }
     }
 
@@ -302,12 +306,12 @@ public class SpawnerManager
         _tick++;
         if (_store.Spawners.Count == 0) return;
 
-        // Silinmis/temizlenmis modelleri yarim saniyede bir yeniden olustur
-        if (_tick % 32 == 0)
+        // Haritada silinmis veya temizlenmis entity'leri kontrol et (her 4 saniyede bir)
+        if (_tick % 256 == 0)
         {
             foreach (var s in _store.Spawners)
             {
-                if (!IsPropAlive(s.Id, out _)) Spawn(s);
+                if (!IsSpawned(s.Id)) Spawn(s);
             }
         }
 
@@ -316,9 +320,17 @@ public class SpawnerManager
         {
             if (MathF.Abs(s.SpinSpeed) < 0.01f) continue;
             s.RuntimeYaw = (s.RuntimeYaw + s.SpinSpeed * TickInterval) % 360f;
+            var angles = new QAngle(s.Angles[0], s.RuntimeYaw, s.Angles[2]);
+            var origin = ToVector(s.Origin);
+
             if (IsPropAlive(s.Id, out var prop))
             {
-                try { prop!.Teleport(ToVector(s.Origin), new QAngle(s.Angles[0], s.RuntimeYaw, s.Angles[2]), new Vector(0f, 0f, 0f)); } catch { }
+                try { prop!.Teleport(origin, angles, new Vector(0f, 0f, 0f)); } catch { }
+            }
+            if (IsTextAlive(s.Id, out var text))
+            {
+                var textPos = new Vector(origin.X, origin.Y, origin.Z + 20f);
+                try { text!.Teleport(textPos, angles, new Vector(0f, 0f, 0f)); } catch { }
             }
         }
 
@@ -508,7 +520,29 @@ public class SpawnerManager
         foreach (var key in _lastPickup.Keys.Where(k => k.Item2 == slot).ToList()) _lastPickup.Remove(key);
     }
 
-    public bool IsSpawned(int id) => IsPropAlive(id, out _);
+    public bool IsPropAlive(int id, out CBaseModelEntity? prop)
+    {
+        prop = null;
+        if (_props.TryGetValue(id, out var handle) && handle.IsValid && handle.Value is { } p && p.IsValid)
+        {
+            prop = p;
+            return true;
+        }
+        return false;
+    }
+
+    public bool IsTextAlive(int id, out CPointWorldText? text)
+    {
+        text = null;
+        if (_texts.TryGetValue(id, out var handle) && handle.IsValid && handle.Value is { } t && t.IsValid)
+        {
+            text = t;
+            return true;
+        }
+        return false;
+    }
+
+    public bool IsSpawned(int id) => IsPropAlive(id, out _) || IsTextAlive(id, out _);
 
     public static string Pretty(string weapon) =>
         weapon.StartsWith("weapon_") ? weapon["weapon_".Length..].ToUpperInvariant() : weapon.ToUpperInvariant();

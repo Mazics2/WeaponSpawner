@@ -1,0 +1,31 @@
+================================================================================
+                    WEAPONSPAWNER - SİLAH DOĞMA NOKTALARI
+                           YAPILMASI GEREKENLER & ENTEGRASYON
+================================================================================
+Eklenti: WeaponSpawner (v1.0.0)
+Repo: https://github.com/Mazics2/WeaponSpawner.git
+
+--------------------------------------------------------------------------------
+1. DURUM & ENTEGRASYON
+--------------------------------------------------------------------------------
+[✓] 1. Harita Üzerinde Otomatik Silah Doğurma:
+    - Haritanın belirli koordinatlarına her raunt başında otomatik silah, bomba, zırh veya zeus yerleştirir.
+    - surf_ski_2_go ve benzeri haritalarda 7 adet spawner aktif olarak çalışmaktadır.
+
+[✓] 2. MenuApi Entegrasyonu:
+    - Yönetici menüsü üzerinden baktığınız noktaya yeni silah spawn noktası ekleme/silme imkanı.
+
+--------------------------------------------------------------------------------
+2. KOMUTLAR
+--------------------------------------------------------------------------------
+* `!ws_spawn` / `!spawner` : Silah spawner yönetim menüsü (Admin).
+* `sw_spawner_add <silah_adı>` : Baktığınız yere silah doğma noktası ekler.
+* `sw_spawner_reload` : Spawner listesini dosyadan yeniden yükler.
+
+--------------------------------------------------------------------------------
+3. ORTAĞIMIN YAPMASI GEREKENLER (TODO)
+--------------------------------------------------------------------------------
+1. Harita Spawner Noktaları:
+   - Yeni workshop haritaları eklendiğinde oyuncuların silah bulabilmesi için gerekli spawn noktalarını
+     harita içinde gezip ekleyin.
+================================================================================
