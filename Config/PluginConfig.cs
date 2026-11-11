@@ -40,14 +40,17 @@ public class PluginConfig
     /// Boylece oyuncunun eline cakisan iki silah gelmez ve yere silah dusmez.</summary>
     public bool ClearTargetSlot { get; set; } = true;
 
-    /// <summary>Spawner modellerine parlama (glow) uygula. (Varsayilan: false)</summary>
-    public bool Glow { get; set; } = false;
+    /// <summary>Spawner modellerine parlama (glow) uygula. (Varsayilan: true)</summary>
+    public bool Glow { get; set; } = true;
 
     /// <summary>Glow rengi (hex).</summary>
     public string GlowColor { get; set; } = "#FFB000";
 
     /// <summary>Glow gorunme mesafesi (birim).</summary>
     public int GlowRange { get; set; } = 1500;
+
+    /// <summary>Spawner modellerinin ustunde silah adi 3D yazi olarak gorunsun mu. (Varsayilan: false)</summary>
+    public bool Show3DText { get; set; } = false;
 
     /// <summary>Silah alininca oyuncuya sohbetten mesaj gonder (false = sessiz).</summary>
     public bool NotifyOnPickup { get; set; } = false;

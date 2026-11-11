@@ -106,6 +106,13 @@ public class SpawnerManager
                         kv.SetBool("disableshadows", true);
                         kv.SetVector("origin", origin);
                         kv.SetQAngle("angles", angles);
+                        if (_config.Glow)
+                        {
+                            kv.SetBool("glowenabled", true);
+                            kv.SetInt32("glowtype", 3);
+                            kv.SetInt32("glowrange", _config.GlowRange);
+                            kv.SetInt32("glowteam", -1);
+                        }
                         prop.DispatchSpawn(kv);
                     }
 
@@ -113,6 +120,7 @@ public class SpawnerManager
                     prop.AcceptInput("DisableMotion", "", null, null, 0);
                     prop.AcceptInput("DisableCollision", "", null, null, 0);
                     ApplyNonSolid(prop);
+                    if (_config.Glow) ApplyGlow(prop);
 
                     if (MathF.Abs(data.Scale - 1f) > 0.001f)
                     {
@@ -128,6 +136,7 @@ public class SpawnerManager
                             {
                                 p.AcceptInput("DisableCollision", "", null, null, 0);
                                 ApplyNonSolid(p);
+                                if (_config.Glow) ApplyGlow(p);
                             }
                         }
                         catch { }
@@ -142,29 +151,32 @@ public class SpawnerManager
             }
         }
 
-        // 2. Havada 3D Yazi (point_worldtext) olustur: [ AWP ]
-        try
+        // 2. Havada 3D Yazi (point_worldtext) olustur (Sadece Show3DText aktifse)
+        if (_config.Show3DText)
         {
-            var text = _core.EntitySystem.CreateEntityByDesignerName<CPointWorldText>("point_worldtext");
-            if (text != null && text.IsValid)
+            try
             {
-                text.MessageText = $"[ {Pretty(data.Weapon)} ]";
-                text.FontSize = 26f;
-                text.WorldUnitsPerPx = 0.22f;
-                text.Color = Color.FromHex("#FFD700"); // Altin sarisi
-                text.Enabled = true;
-                text.Fullbright = true;
-                text.DispatchSpawn();
+                var text = _core.EntitySystem.CreateEntityByDesignerName<CPointWorldText>("point_worldtext");
+                if (text != null && text.IsValid)
+                {
+                    text.MessageText = $"[ {Pretty(data.Weapon)} ]";
+                    text.FontSize = 26f;
+                    text.WorldUnitsPerPx = 0.22f;
+                    text.Color = Color.FromHex("#FFD700"); // Altin sarisi
+                    text.Enabled = true;
+                    text.Fullbright = true;
+                    text.DispatchSpawn();
 
-                var textPos = new Vector(origin.X, origin.Y, origin.Z + 20f);
-                text.Teleport(textPos, angles, new Vector(0f, 0f, 0f));
+                    var textPos = new Vector(origin.X, origin.Y, origin.Z + 20f);
+                    text.Teleport(textPos, angles, new Vector(0f, 0f, 0f));
 
-                _texts[data.Id] = _core.EntitySystem.GetRefEHandle(text);
+                    _texts[data.Id] = _core.EntitySystem.GetRefEHandle(text);
+                }
             }
-        }
-        catch (Exception ex)
-        {
-            _core.Logger.LogDebug($"[WeaponSpawner] 3D yazi olusturulamadi: {ex.Message}");
+            catch (Exception ex)
+            {
+                _core.Logger.LogDebug($"[WeaponSpawner] 3D yazi olusturulamadi: {ex.Message}");
+            }
         }
 
         return _props.ContainsKey(data.Id) || _texts.ContainsKey(data.Id);
@@ -207,6 +219,7 @@ public class SpawnerManager
                 modelEntity.Glow.GlowTeamUpdated();
                 modelEntity.Glow.GlowType = 3;
                 modelEntity.Glow.GlowTypeUpdated();
+                modelEntity.Glow.Glowing = true;
             }
         }
         catch (Exception ex)
@@ -456,7 +469,12 @@ public class SpawnerManager
             catch { }
         }
 
-        // 3) Bir sonraki tick'te yeni silahi ver ve ele sec
+        if (_config.NotifyOnPickup)
+        {
+            player.SendChat($"{_config.ChatPrefix} [lime]{Pretty(s.Weapon)}[default] aldınız.");
+        }
+
+        // 3) Bir sonraki tick'te yeni silahi ver ve WeaponSkins skin guncellemesini tetikle
         var slot = player.Slot;
         var weaponName = s.Weapon;
         _core.Scheduler.NextTick(() =>
@@ -469,9 +487,55 @@ public class SpawnerManager
             try
             {
                 var given = pp.ItemServices.GiveItem<CBasePlayerWeapon>(weaponName);
-                if (given != null && given.IsValid && pp.WeaponServices != null)
+                if (given != null && given.IsValid)
                 {
-                    pp.WeaponServices.SelectWeapon(given);
+                    if (pp.WeaponServices != null)
+                    {
+                        pp.WeaponServices.SelectWeapon(given);
+                    }
+
+                    var givenHandle = _core.EntitySystem.GetRefEHandle(given);
+                    var givenAddr = given.Address;
+
+                    // WeaponSkins eklentisinin silaha aninda skin giydirmesi icin
+                    // (oyuncunun sohbete !wp yazmasiyla ayni etkiyi yapan) konsol komutunu tetikliyoruz:
+                    _core.Scheduler.NextTick(() =>
+                    {
+                        try
+                        {
+                            _core.Engine.ExecuteCommand($"sw_wp_admin {p.SteamID}");
+                        }
+                        catch { }
+
+                        // WeaponSkins calistiginda eski silahi yere atar (RemoveWeapon) ve yeni skinli silah verir.
+                        // Yere dusen eski kopyayi (given) yok ediyoruz.
+                        void CheckAndDestroyDropped()
+                        {
+                            try
+                            {
+                                if (givenHandle.IsValid && givenHandle.Value is { } dropped && dropped.IsValid)
+                                {
+                                    var curP = _core.PlayerManager.GetPlayer(slot);
+                                    var curWeapons = curP?.PlayerPawn?.WeaponServices?.MyValidWeapons;
+                                    bool stillHeld = curWeapons != null && curWeapons.Any(w => w != null && w.IsValid && w.Address == givenAddr);
+
+                                    // Eger bu ilk silah artik oyuncunun elinde/envanterinde degilse (yere dusmusse), yok et:
+                                    if (!stillHeld)
+                                    {
+                                        dropped.AcceptInput("Kill", "", null, null, 0);
+                                        dropped.Despawn();
+                                    }
+                                }
+                            }
+                            catch { }
+                        }
+
+                        // WeaponSkins async/tick durumuna gore kontroller:
+                        _core.Scheduler.NextTick(CheckAndDestroyDropped);
+                        _core.Scheduler.DelayBySeconds(0.05f, CheckAndDestroyDropped);
+                        _core.Scheduler.DelayBySeconds(0.15f, CheckAndDestroyDropped);
+                        _core.Scheduler.DelayBySeconds(0.3f, CheckAndDestroyDropped);
+                    });
                 }
             }
             catch (Exception ex)

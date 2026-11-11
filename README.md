@@ -92,6 +92,7 @@ Eklenti ilk çalıştığında eklenti klasöründe otomatik olarak `config.json
   "Glow": true,
   "GlowColor": "#FFB000",
   "GlowRange": 1500,
+  "Show3DText": false,
   "NotifyOnPickup": true,
   "ModelOverrides": {}
 }
@@ -101,10 +102,12 @@ Eklenti ilk çalıştığında eklenti klasöründe otomatik olarak `config.json
 - **`Permissions`:** Komutları kullanabilecek yetki düğümleri (Swiftly yetki sistemi). Boş liste bırakırsanız yetki kontrolü yapılmaz.
 - **`DefaultRadius`:** Yeni oluşturulan spawner'ların varsayılan alma yarıçapı (birim).
 - **`DefaultHeightOffset`:** Nişan alınan zemin noktasından ne kadar yukarıda duracağı (zemine gömülmemesi için).
+- **`PickupHeight`:** Algılama yüksekliği toleransı.
 - **`PickupCooldownSeconds`:** Aynı oyuncunun aynı spawner'dan tekrar alabilmesi için gereken asgari süre (ayrıca oyuncunun alandan çıkıp tekrar girmesi gerekir).
 - **`KeepKnife` / `KeepC4`:** Oyuncunun elindeki bıçak ve C4'ün silinmesini engeller (`true` önerilir).
 - **`ClearTargetSlot`:** Yeni silah verildiğinde çakışan eski tüfek/tabancanın slottan temizlenmesi (`true`).
-- **`Glow` & `GlowColor`:** Modellerin uzaktan altın renginde parlamasını sağlar.
+- **`Glow` & `GlowColor`:** Modellerin uzaktan parlamasını sağlar (varsayılan: `true`).
+- **`Show3DText`:** Silah modelinin üstünde 3D metin (`[ AWP ]`) yazısı gösterilip gösterilmeyeceği (varsayılan: `false`).
 - **`ModelOverrides`:** Özel veya atölye modelleri tanımlamak isterseniz silah adına karşılık gelen `.vmdl` yolunu buraya yazabilirsiniz.
 
 ---
