@@ -150,5 +150,42 @@ public class SpawnerStore
             return new PluginConfig();
         }
     }
+
+    public static void SaveConfig(ISwiftlyCore core, PluginConfig cfg)
+    {
+        var baseDir = ResolveBasePath(core);
+        var path = Path.Combine(baseDir, "config.json");
+        try
+        {
+            Directory.CreateDirectory(baseDir);
+            File.WriteAllText(path, JsonSerializer.Serialize(cfg, Json));
+        }
+        catch (Exception ex)
+        {
+            core.Logger.LogError($"[WeaponSpawner] config.json kaydedilemedi: {ex.Message}");
+        }
+    }
+
+    /// <summary>config.json dosyasini diskten tekrar okuyup mevcut ornegi yerinde gunceller.</summary>
+    public static void ReloadConfigInto(ISwiftlyCore core, PluginConfig target)
+    {
+        var fresh = LoadConfig(core);
+        target.Command = fresh.Command;
+        target.Aliases = fresh.Aliases;
+        target.Permissions = fresh.Permissions;
+        target.ChatPrefix = fresh.ChatPrefix;
+        target.DefaultRadius = fresh.DefaultRadius;
+        target.DefaultHeightOffset = fresh.DefaultHeightOffset;
+        target.PickupHeight = fresh.PickupHeight;
+        target.PickupCooldownSeconds = fresh.PickupCooldownSeconds;
+        target.KeepKnife = fresh.KeepKnife;
+        target.KeepC4 = fresh.KeepC4;
+        target.ClearTargetSlot = fresh.ClearTargetSlot;
+        target.Glow = fresh.Glow;
+        target.GlowColor = fresh.GlowColor;
+        target.GlowRange = fresh.GlowRange;
+        target.NotifyOnPickup = fresh.NotifyOnPickup;
+        target.ModelOverrides = fresh.ModelOverrides;
+    }
 }
 

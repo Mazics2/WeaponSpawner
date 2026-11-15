@@ -14,7 +14,7 @@ public static class WeaponCatalog
         // Tufekler
         ["weapon_ak47"]          = new("weapons/models/ak47/weapon_rif_ak47.vmdl", gear_slot_t.GEAR_SLOT_RIFLE),
         ["weapon_m4a1"]          = new("weapons/models/m4a4/weapon_rif_m4a4.vmdl", gear_slot_t.GEAR_SLOT_RIFLE),
-        ["weapon_m4a1_silencer"] = new("weapons/models/m4a1s/weapon_rif_m4a1_s.vmdl", gear_slot_t.GEAR_SLOT_RIFLE),
+        ["weapon_m4a1_silencer"] = new("weapons/models/m4a1_silencer/weapon_rif_m4a1_silencer.vmdl", gear_slot_t.GEAR_SLOT_RIFLE),
         ["weapon_famas"]         = new("weapons/models/famas/weapon_rif_famas.vmdl", gear_slot_t.GEAR_SLOT_RIFLE),
         ["weapon_galilar"]       = new("weapons/models/galilar/weapon_rif_galilar.vmdl", gear_slot_t.GEAR_SLOT_RIFLE),
         ["weapon_aug"]           = new("weapons/models/aug/weapon_rif_aug.vmdl", gear_slot_t.GEAR_SLOT_RIFLE),
@@ -38,7 +38,7 @@ public static class WeaponCatalog
         ["weapon_mag7"]          = new("weapons/models/mag7/weapon_shot_mag7.vmdl", gear_slot_t.GEAR_SLOT_RIFLE),
         ["weapon_sawedoff"]      = new("weapons/models/sawedoff/weapon_shot_sawedoff.vmdl", gear_slot_t.GEAR_SLOT_RIFLE),
         ["weapon_negev"]         = new("weapons/models/negev/weapon_mach_negev.vmdl", gear_slot_t.GEAR_SLOT_RIFLE),
-        ["weapon_m249"]          = new("weapons/models/m249/weapon_mach_m249para.vmdl", gear_slot_t.GEAR_SLOT_RIFLE),
+        ["weapon_m249"]          = new("weapons/models/m249/weapon_mach_m249.vmdl", gear_slot_t.GEAR_SLOT_RIFLE),
         // Tabancalar
         ["weapon_deagle"]        = new("weapons/models/deagle/weapon_pist_deagle.vmdl", gear_slot_t.GEAR_SLOT_PISTOL),
         ["weapon_revolver"]      = new("weapons/models/revolver/weapon_pist_revolver.vmdl", gear_slot_t.GEAR_SLOT_PISTOL),
@@ -51,7 +51,7 @@ public static class WeaponCatalog
         ["weapon_tec9"]          = new("weapons/models/tec9/weapon_pist_tec9.vmdl", gear_slot_t.GEAR_SLOT_PISTOL),
         ["weapon_elite"]         = new("weapons/models/elite/weapon_pist_elite.vmdl", gear_slot_t.GEAR_SLOT_PISTOL),
         // Diger
-        ["weapon_taser"]         = new("weapons/models/taser/weapon_taser.vmdl", gear_slot_t.GEAR_SLOT_KNIFE),
+        ["weapon_taser"]         = new("weapons/models/taser/weapon_pist_taser.vmdl", gear_slot_t.GEAR_SLOT_KNIFE),
     };
 
     /// <summary>Kisa adlari (orn. "m4a4", "usp") tam silah adina cevirir.</summary>

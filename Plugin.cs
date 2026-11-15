@@ -30,6 +30,7 @@ public class WeaponSpawnerPlugin(ISwiftlyCore core) : BasePlugin(core)
     private SpawnerStore _store = null!;
     private SpawnerManager _manager = null!;
     private AimTracer _tracer = null!;
+    private WeaponSpawnerMenu _menu = null!;
 
     private readonly List<Guid> _commandGuids = new();
     private Guid _chatHookGuid;
@@ -46,6 +47,11 @@ public class WeaponSpawnerPlugin(ISwiftlyCore core) : BasePlugin(core)
         _store = new SpawnerStore(Core);
         _manager = new SpawnerManager(Core, _store, _config);
         _tracer = new AimTracer(Core);
+        _menu = new WeaponSpawnerMenu(Core, _store, _manager, _tracer, _config, () =>
+        {
+            var map = TryGetCurrentMap() ?? _store.CurrentMap;
+            LoadMap(map);
+        });
 
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { _config.Command };
         if (_config.Aliases != null)
@@ -107,6 +113,7 @@ public class WeaponSpawnerPlugin(ISwiftlyCore core) : BasePlugin(core)
         }
         _commandGuids.Clear();
 
+        _menu?.CloseAll();
         _manager?.DespawnAll();
         _mapReady = false;
     }
@@ -147,6 +154,7 @@ public class WeaponSpawnerPlugin(ISwiftlyCore core) : BasePlugin(core)
 
     private void OnMapLoad(IOnMapLoadEvent e)
     {
+        _menu?.CloseAll();
         _mapReady = false;
         var map = e.MapName;
         Core.Scheduler.NextTick(() =>
@@ -158,6 +166,7 @@ public class WeaponSpawnerPlugin(ISwiftlyCore core) : BasePlugin(core)
 
     private void OnMapUnload(IOnMapUnloadEvent e)
     {
+        _menu?.CloseAll();
         _mapReady = false;
         _manager.DespawnAll();
     }
@@ -180,6 +189,7 @@ public class WeaponSpawnerPlugin(ISwiftlyCore core) : BasePlugin(core)
 
     private void OnClientDisconnected(IOnClientDisconnectedEvent e)
     {
+        _menu?.OnPlayerDisconnected(e.PlayerId);
         _manager.OnPlayerDisconnected(e.PlayerId);
     }
 
@@ -250,7 +260,7 @@ public class WeaponSpawnerPlugin(ISwiftlyCore core) : BasePlugin(core)
 
         if (args.Length == 0)
         {
-            SendHelp(player);
+            _menu.Toggle(player);
             return;
         }
 
@@ -261,6 +271,10 @@ public class WeaponSpawnerPlugin(ISwiftlyCore core) : BasePlugin(core)
         {
             switch (sub)
             {
+                case "menu": case "menü":
+                    _menu.Toggle(player); break;
+                case "yardim": case "yardım": case "help":
+                    SendHelp(player); break;
                 case "ekle": case "olustur": case "add": case "create":
                     CmdCreate(player, rest); break;
                 case "sil": case "kaldir": case "delete": case "remove":

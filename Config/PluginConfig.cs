@@ -40,8 +40,8 @@ public class PluginConfig
     /// Boylece oyuncunun eline cakisan iki silah gelmez ve yere silah dusmez.</summary>
     public bool ClearTargetSlot { get; set; } = true;
 
-    /// <summary>Spawner modellerine parlama (glow) uygula. (Varsayilan: false)</summary>
-    public bool Glow { get; set; } = false;
+    /// <summary>Spawner modellerine parlama (glow) uygula. (Varsayilan: true)</summary>
+    public bool Glow { get; set; } = true;
 
     /// <summary>Glow rengi (hex).</summary>
     public string GlowColor { get; set; } = "#FFB000";

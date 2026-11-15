@@ -1,3 +1,4 @@
+using System.Globalization;
 using Microsoft.Extensions.Logging;
 using SwiftlyS2.Shared;
 using SwiftlyS2.Shared.EntitySystem;
@@ -10,23 +11,22 @@ using WeaponSpawner.Models;
 namespace WeaponSpawner.Services;
 
 /// <summary>
-/// Spawner'larin dunyadaki prop_dynamic modellerini yonetir (olusturma, yeniden olusturma,
-/// konum/aci guncelleme, donme) ve oyuncu yaklasinca silah degisimini yapar.
+/// Spawner'larin dunyadaki <c>prop_physics</c> modellerini yonetir (olusturma, yeniden olusturma,
+/// konum/aci/olcek guncelleme, donme, glow) ve oyuncu yaklasinca silah degisimini yapar.
 /// Spawner, silah alindiktan sonra da haritada kalir.
 /// </summary>
 public class SpawnerManager
 {
     private const float TickInterval = 1f / 64f;
+    private static readonly Color DefaultGlowColor = new(255, 176, 0, 255);
 
     private readonly ISwiftlyCore _core;
     private readonly SpawnerStore _store;
     private readonly PluginConfig _config;
+    private readonly SkinIntegrationService? _skinIntegration;
 
     /// <summary>Spawner Id -> dunyadaki model entity'si.</summary>
     private readonly Dictionary<int, CHandle<CBaseModelEntity>> _props = new();
-
-    /// <summary>Spawner Id -> dunyadaki 3D yazi entity'si.</summary>
-    private readonly Dictionary<int, CHandle<CPointWorldText>> _texts = new();
 
     /// <summary>Spawner Id -> su an alanin icinde olan oyuncu slotlari (kenar tetikleme icin).</summary>
     private readonly Dictionary<int, HashSet<int>> _inside = new();
@@ -34,13 +34,18 @@ public class SpawnerManager
     /// <summary>(spawnerId, slot) -> son alma zamani.</summary>
     private readonly Dictionary<(int, int), float> _lastPickup = new();
 
-    private int _tick;
+    /// <summary>Katalogda olmayan silahlar icin calisma zamaninda bulunan modeller.</summary>
+    private readonly Dictionary<string, string> _modelCache = new(StringComparer.OrdinalIgnoreCase);
 
-    public SpawnerManager(ISwiftlyCore core, SpawnerStore store, PluginConfig config)
+    private int _tick;
+    private string? _invalidGlowColorWarned;
+
+    public SpawnerManager(ISwiftlyCore core, SpawnerStore store, PluginConfig config, SkinIntegrationService? skinIntegration = null)
     {
         _core = core;
         _store = store;
         _config = config;
+        _skinIntegration = skinIntegration;
     }
 
     // ------------------------------------------------------------------
@@ -49,8 +54,35 @@ public class SpawnerManager
 
     public string? ResolveModel(string weapon)
     {
+        if (string.IsNullOrWhiteSpace(weapon)) return null;
+
         if (_config.ModelOverrides.TryGetValue(weapon, out var ov) && !string.IsNullOrWhiteSpace(ov)) return ov;
-        return WeaponCatalog.GetModel(weapon);
+
+        var known = WeaponCatalog.GetModel(weapon);
+        if (known != null) return known;
+
+        if (_modelCache.TryGetValue(weapon, out var cached)) return cached;
+
+        // Son care: gecici bir silah entity'si olusturup gercek model yolunu oku ve onbellege al.
+        try
+        {
+            var temp = _core.EntitySystem.CreateEntityByDesignerName<CBasePlayerWeapon>(weapon);
+            if (temp == null || !temp.IsValid) return null;
+            temp.DispatchSpawn();
+            var model = temp.GetModel();
+            temp.Despawn();
+            if (!string.IsNullOrWhiteSpace(model))
+            {
+                _modelCache[weapon] = model;
+                return model;
+            }
+        }
+        catch (Exception ex)
+        {
+            _core.Logger.LogWarning($"[WeaponSpawner] '{weapon}' modeli bulunamadi: {ex.Message}");
+        }
+
+        return null;
     }
 
     /// <summary>Precache icin bilinen tum model yollari.</summary>
@@ -66,6 +98,10 @@ public class SpawnerManager
         {
             if (!string.IsNullOrWhiteSpace(m)) set.Add(m);
         }
+        foreach (var m in _modelCache.Values)
+        {
+            if (!string.IsNullOrWhiteSpace(m)) set.Add(m);
+        }
         return set;
     }
 
@@ -74,100 +110,109 @@ public class SpawnerManager
         foreach (var s in _store.Spawners) Spawn(s);
     }
 
-    /// <summary>Spawner modelini ve 3D yazisini olusturur.</summary>
+    /// <summary>Spawner 3D prop modelini (yeniden) olusturur.</summary>
     public bool Spawn(SpawnerData data)
     {
         Despawn(data.Id);
 
-        var origin = ToVector(data.Origin);
-        var angles = new QAngle(data.Angles[0], data.RuntimeYaw, data.Angles[2]);
         var model = ResolveModel(data.Weapon);
-
-        // 1. Model (prop_physics) olustur
-        if (!string.IsNullOrWhiteSpace(model))
+        if (string.IsNullOrWhiteSpace(model))
         {
-            try
-            {
-                var prop = _core.EntitySystem.CreateEntityByDesignerName<CPhysicsProp>("prop_physics")
-                           ?? _core.EntitySystem.CreateEntityByDesignerName<CBaseModelEntity>("prop_physics");
-
-                if (prop != null && prop.IsValid)
-                {
-                    // ONEMLI: DispatchSpawn oncesi asla SetModel() cagrilmaz! Aksi halde Source 2 motoru
-                    // EF_IN_STAGING_LIST assertion hatasi verir. Model keyvalues uzerinden verilir.
-                    using (var kv = new CEntityKeyValues())
-                    {
-                        kv.SetString("model", model);
-                        kv.SetString("targetname", $"weaponspawner_{data.Id}");
-                        kv.SetInt32("spawnflags", 8);          // 8 = Motion Disabled (yercekimsiz / havada donuk)
-                        kv.SetBool("motiondisabled", true);
-                        kv.SetInt32("solid", 0);               // Carpisma yok; oyuncu icinden gecer
-                        kv.SetInt32("CollisionGroup", (int)CollisionGroup.Debris);
-                        kv.SetBool("disableshadows", true);
-                        kv.SetVector("origin", origin);
-                        kv.SetQAngle("angles", angles);
-                        prop.DispatchSpawn(kv);
-                    }
-
-                    prop.Teleport(origin, angles, new Vector(0f, 0f, 0f));
-                    prop.AcceptInput("DisableMotion", "", null, null, 0);
-                    prop.AcceptInput("DisableCollision", "", null, null, 0);
-                    ApplyNonSolid(prop);
-
-                    if (MathF.Abs(data.Scale - 1f) > 0.001f)
-                    {
-                        try { prop.SetScale(data.Scale); } catch { }
-                    }
-
-                    var propHandle = _core.EntitySystem.GetRefEHandle(prop);
-                    _core.Scheduler.NextTick(() =>
-                    {
-                        try
-                        {
-                            if (propHandle.IsValid && propHandle.Value is { } p && p.IsValid)
-                            {
-                                p.AcceptInput("DisableCollision", "", null, null, 0);
-                                ApplyNonSolid(p);
-                            }
-                        }
-                        catch { }
-                    });
-
-                    _props[data.Id] = propHandle;
-                }
-            }
-            catch (Exception ex)
-            {
-                _core.Logger.LogDebug($"[WeaponSpawner] #{data.Id} model olusturulamadi: {ex.Message}");
-            }
+            _core.Logger.LogWarning($"[WeaponSpawner] #{data.Id} ({data.Weapon}) icin model bulunamadi, olusturulamadi.");
+            return false;
         }
 
-        // 2. Havada 3D Yazi (point_worldtext) olustur: [ AWP ]
         try
         {
-            var text = _core.EntitySystem.CreateEntityByDesignerName<CPointWorldText>("point_worldtext");
-            if (text != null && text.IsValid)
+            // CS2 silah modelleri 'propdata' icerdiginden prop_dynamic yerine prop_physics kullanilir
+            // ve spawnflags=8 (Motion Disabled) ile yercekimsiz/sabit olarak havada tutulur.
+            CBaseModelEntity? prop = _core.EntitySystem.CreateEntityByDesignerName<CPhysicsProp>("prop_physics")
+                                     ?? _core.EntitySystem.CreateEntityByDesignerName<CPhysicsProp>("prop_physics_override")
+                                     ?? _core.EntitySystem.CreateEntityByDesignerName<CBaseModelEntity>("prop_physics")
+                                     ?? _core.EntitySystem.CreateEntityByDesignerName<CBaseModelEntity>("prop_physics_override");
+
+            if (prop == null || !prop.IsValid)
             {
-                text.MessageText = $"[ {Pretty(data.Weapon)} ]";
-                text.FontSize = 26f;
-                text.WorldUnitsPerPx = 0.22f;
-                text.Color = Color.FromHex("#FFD700"); // Altin sarisi
-                text.Enabled = true;
-                text.Fullbright = true;
-                text.DispatchSpawn();
-
-                var textPos = new Vector(origin.X, origin.Y, origin.Z + 20f);
-                text.Teleport(textPos, angles, new Vector(0f, 0f, 0f));
-
-                _texts[data.Id] = _core.EntitySystem.GetRefEHandle(text);
+                _core.Logger.LogWarning($"[WeaponSpawner] #{data.Id} ({data.Weapon}) icin prop_physics entity'si olusturulamadi.");
+                return false;
             }
+
+            var origin = ToVector(data.Origin);
+            var angles = new QAngle(data.Angles[0], data.RuntimeYaw, data.Angles[2]);
+            bool glowEnabled = IsGlowEnabled();
+            var glowColor = glowEnabled ? ResolveGlowColor() : new Color(0, 0, 0, 0);
+
+            // DispatchSpawn oncesi ASLA SetModel() cagirmayin (EF_IN_STAGING_LIST assertion'ini tetikler).
+            // Model ve baslangic fizik/glow alanlari CEntityKeyValues uzerinden verilir.
+            using (var kv = new CEntityKeyValues())
+            {
+                kv.SetString("model", model);
+                kv.SetString("targetname", $"weaponspawner_{data.Id}");
+                kv.SetInt32("spawnflags", 8);          // 8 = Motion Disabled
+                kv.SetBool("motiondisabled", true);
+                kv.SetBool("forcemotiondisabled", true);
+                kv.SetBool("phys_start_asleep", true);
+                kv.SetInt32("solid", 0);               // Carpisma yok; oyuncu icinden gecer
+                kv.SetInt32("CollisionGroup", (int)CollisionGroup.Debris);
+                kv.SetBool("disableshadows", true);
+                kv.SetVector("origin", origin);
+                kv.SetQAngle("angles", angles);
+                kv.SetInt32("glowstate", glowEnabled ? 3 : 0);
+                kv.SetInt32("glowrange", glowEnabled ? Math.Max(0, _config.GlowRange) : 0);
+                kv.SetInt32("glowrangemin", 0);
+                kv.SetColor("glowcolor", glowColor);
+                prop.DispatchSpawn(kv);
+            }
+
+            try
+            {
+                if (string.IsNullOrWhiteSpace(prop.GetModel()))
+                {
+                    prop.SetModel(model);
+                }
+            }
+            catch { }
+
+            prop.Teleport(origin, angles, new Vector(0f, 0f, 0f));
+            try { prop.AcceptInput("DisableMotion", "", null, null, 0); } catch { }
+            try { prop.AcceptInput("DisableCollision", "", null, null, 0); } catch { }
+
+            ApplyNonSolid(prop);
+            ApplyScale(prop, data.Scale);
+            ApplyGlow(prop, glowEnabled);
+
+            // CS2 fizik/glow alt sistemi spawn tick'inde bazi bayraklari sifirlayabildigi icin
+            // bir sonraki tick'te non-solid ve guncel glow durumunu tekrar saglamlastir.
+            var propHandle = _core.EntitySystem.GetRefEHandle(prop);
+            _core.Scheduler.NextTick(() =>
+            {
+                try
+                {
+                    if (propHandle.IsValid && propHandle.Value is { } p && p.IsValid)
+                    {
+                        try { p.AcceptInput("DisableMotion", "", null, null, 0); } catch { }
+                        try { p.AcceptInput("DisableCollision", "", null, null, 0); } catch { }
+                        ApplyNonSolid(p);
+                        ApplyGlow(p, IsGlowEnabled());
+                    }
+                }
+                catch { }
+            });
+
+            _props[data.Id] = propHandle;
+            return true;
         }
         catch (Exception ex)
         {
-            _core.Logger.LogDebug($"[WeaponSpawner] 3D yazi olusturulamadi: {ex.Message}");
+            _core.Logger.LogError(ex, $"[WeaponSpawner] #{data.Id} ({data.Weapon}) olusturulamadi: {ex.Message}");
+            return false;
         }
+    }
 
-        return _props.ContainsKey(data.Id) || _texts.ContainsKey(data.Id);
+    private static void ApplyScale(CBaseModelEntity prop, float scale)
+    {
+        var clamped = float.IsFinite(scale) ? Math.Clamp(scale, 0.05f, 10f) : 1f;
+        try { prop.SetScale(clamped); } catch { }
     }
 
     private static void ApplyNonSolid(CBaseEntity prop)
@@ -190,32 +235,136 @@ public class SpawnerManager
         catch { }
     }
 
-    private void ApplyGlow(CBaseEntity prop)
+    private bool IsGlowEnabled() => _config.Glow && _config.GlowRange >= 0;
+
+    private Color ResolveGlowColor()
+    {
+        if (TryParseHexColor(_config.GlowColor, out var parsed))
+        {
+            return parsed.A == 0 ? new Color(parsed.R, parsed.G, parsed.B, 255) : parsed;
+        }
+
+        if (!string.Equals(_invalidGlowColorWarned, _config.GlowColor, StringComparison.Ordinal))
+        {
+            _invalidGlowColorWarned = _config.GlowColor;
+            _core.Logger.LogWarning($"[WeaponSpawner] Gecersiz GlowColor '{_config.GlowColor}', varsayilan #FFB000 kullaniliyor.");
+        }
+
+        return DefaultGlowColor;
+    }
+
+    /// <summary>
+    /// Hex renk kodunu (#RGB, #RGBA, #RRGGBB, #RRGGBBAA veya # isaretsiz) guvenle ayristirir.
+    /// </summary>
+    public static bool TryParseHexColor(string? hex, out Color color)
+    {
+        color = DefaultGlowColor;
+        if (string.IsNullOrWhiteSpace(hex)) return false;
+
+        var span = hex.AsSpan().Trim();
+        if (span.StartsWith("#")) span = span[1..];
+
+        if (span.Length is not (3 or 4 or 6 or 8)) return false;
+
+        static bool TryHexByte(ReadOnlySpan<char> chars, out byte value) =>
+            byte.TryParse(chars, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out value);
+
+        if (span.Length is 3 or 4)
+        {
+            Span<char> expanded = stackalloc char[2];
+            byte Expand(char ch)
+            {
+                expanded[0] = ch;
+                expanded[1] = ch;
+                return byte.TryParse(expanded, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var b) ? b : (byte)0;
+            }
+
+            foreach (var c in span)
+            {
+                if (!Uri.IsHexDigit(c)) return false;
+            }
+
+            byte r = Expand(span[0]);
+            byte g = Expand(span[1]);
+            byte b = Expand(span[2]);
+            byte a = span.Length == 4 ? Expand(span[3]) : (byte)255;
+            color = new Color(r, g, b, a);
+            return true;
+        }
+
+        if (!TryHexByte(span[..2], out var r8) ||
+            !TryHexByte(span[2..4], out var g8) ||
+            !TryHexByte(span[4..6], out var b8))
+        {
+            return false;
+        }
+
+        byte a8 = 255;
+        if (span.Length == 8 && !TryHexByte(span[6..8], out a8))
+        {
+            return false;
+        }
+
+        color = new Color(r8, g8, b8, a8);
+        return true;
+    }
+
+    private void ApplyGlow(CBaseModelEntity prop, bool enabled)
     {
         try
         {
-            if (prop is CBaseModelEntity modelEntity)
+            var glow = prop.Glow;
+            if (glow == null) return;
+
+            if (enabled)
             {
-                var color = Color.FromHex(_config.GlowColor);
-                modelEntity.Glow.GlowColorOverride = color;
-                modelEntity.Glow.GlowColorOverrideUpdated();
-                modelEntity.Glow.GlowRange = _config.GlowRange;
-                modelEntity.Glow.GlowRangeUpdated();
-                modelEntity.Glow.GlowRangeMin = 0;
-                modelEntity.Glow.GlowRangeMinUpdated();
-                modelEntity.Glow.GlowTeam = -1;
-                modelEntity.Glow.GlowTeamUpdated();
-                modelEntity.Glow.GlowType = 3;
-                modelEntity.Glow.GlowTypeUpdated();
+                var color = ResolveGlowColor();
+                glow.GlowColorOverride = color;
+                glow.GlowRange = Math.Max(0, _config.GlowRange);
+                glow.GlowRangeMin = 0;
+                glow.GlowTeam = -1;
+                glow.GlowType = 3;
+                glow.Flashing = false;
+                glow.EligibleForScreenHighlight = true;
+                glow.Glowing = true;
+
+                glow.GlowColorOverrideUpdated();
+                glow.GlowRangeUpdated();
+                glow.GlowRangeMinUpdated();
+                glow.GlowTeamUpdated();
+                glow.GlowTypeUpdated();
+                glow.FlashingUpdated();
+                glow.EligibleForScreenHighlightUpdated();
+                prop.GlowUpdated();
+            }
+            else
+            {
+                glow.GlowColorOverride = new Color(0, 0, 0, 0);
+                glow.GlowType = 0;
+                glow.GlowRange = 0;
+                glow.GlowRangeMin = 0;
+                glow.GlowTeam = -1;
+                glow.Flashing = false;
+                glow.EligibleForScreenHighlight = false;
+                glow.Glowing = false;
+
+                glow.GlowColorOverrideUpdated();
+                glow.GlowTypeUpdated();
+                glow.GlowRangeUpdated();
+                glow.GlowRangeMinUpdated();
+                glow.GlowTeamUpdated();
+                glow.FlashingUpdated();
+                glow.EligibleForScreenHighlightUpdated();
+                prop.GlowUpdated();
             }
         }
         catch (Exception ex)
         {
-            _core.Logger.LogDebug($"[WeaponSpawner] Glow uygulanamadi: {ex.Message}");
+            _core.Logger.LogWarning($"[WeaponSpawner] Glow uygulanamadi: {ex.Message}");
         }
     }
 
-    /// <summary>Sadece dunyadaki modeli ve yaziyi kaldirir (oyuncu durum bilgisi korunur).</summary>
+    /// <summary>Sadece dunyadaki modeli kaldirir (oyuncu durum bilgisi korunur).</summary>
     public void Despawn(int id)
     {
         if (IsPropAlive(id, out var prop))
@@ -223,12 +372,6 @@ public class SpawnerManager
             try { prop!.Despawn(); } catch { }
         }
         _props.Remove(id);
-
-        if (IsTextAlive(id, out var text))
-        {
-            try { text!.Despawn(); } catch { }
-        }
-        _texts.Remove(id);
     }
 
     /// <summary>Spawner tamamen silindiginde model + durum bilgisini temizler.</summary>
@@ -241,10 +384,8 @@ public class SpawnerManager
 
     public void DespawnAll()
     {
-        var allIds = _props.Keys.Concat(_texts.Keys).Distinct().ToList();
-        foreach (var id in allIds) Despawn(id);
+        foreach (var id in _props.Keys.ToList()) Despawn(id);
         _props.Clear();
-        _texts.Clear();
         _inside.Clear();
     }
 
@@ -252,48 +393,29 @@ public class SpawnerManager
     public void ForgetAndRespawn()
     {
         _props.Clear();
-        _texts.Clear();
         _inside.Clear();
         SpawnAll();
     }
 
-    /// <summary>Konum/aci/olcek degisikligini dunyaya uygular.</summary>
+    /// <summary>Konum/aci/olcek/glow degisikligini dunyaya uygular.</summary>
     public void ApplyTransform(SpawnerData data)
     {
         data.RuntimeYaw = data.Angles[1];
-        var origin = ToVector(data.Origin);
-        var angles = new QAngle(data.Angles[0], data.RuntimeYaw, data.Angles[2]);
-        var textPos = new Vector(origin.X, origin.Y, origin.Z + 20f);
-
-        bool hasProp = IsPropAlive(data.Id, out var prop);
-        bool hasText = IsTextAlive(data.Id, out var text);
-
-        if (!hasProp && !hasText)
+        if (!IsPropAlive(data.Id, out var prop))
         {
             Spawn(data);
             return;
         }
 
-        if (hasProp && prop != null)
+        try
         {
-            try
-            {
-                prop.Teleport(origin, angles, new Vector(0f, 0f, 0f));
-                if (MathF.Abs(data.Scale - 1f) > 0.001f)
-                {
-                    prop.SetScale(data.Scale);
-                }
-            }
-            catch { }
+            prop!.Teleport(ToVector(data.Origin), new QAngle(data.Angles[0], data.RuntimeYaw, data.Angles[2]), new Vector(0f, 0f, 0f));
+            ApplyScale(prop, data.Scale);
+            ApplyGlow(prop, IsGlowEnabled());
         }
-
-        if (hasText && text != null)
+        catch
         {
-            try
-            {
-                text.Teleport(textPos, angles, new Vector(0f, 0f, 0f));
-            }
-            catch { }
+            Spawn(data);
         }
     }
 
@@ -306,12 +428,12 @@ public class SpawnerManager
         _tick++;
         if (_store.Spawners.Count == 0) return;
 
-        // Haritada silinmis veya temizlenmis entity'leri kontrol et (her 4 saniyede bir)
-        if (_tick % 256 == 0)
+        // Haritada silinmis veya temizlenmis prop'lari saniyede bir kontrol et ve yeniden olustur
+        if (_tick % 64 == 0)
         {
             foreach (var s in _store.Spawners)
             {
-                if (!IsSpawned(s.Id)) Spawn(s);
+                if (!IsPropAlive(s.Id, out _)) Spawn(s);
             }
         }
 
@@ -320,17 +442,9 @@ public class SpawnerManager
         {
             if (MathF.Abs(s.SpinSpeed) < 0.01f) continue;
             s.RuntimeYaw = (s.RuntimeYaw + s.SpinSpeed * TickInterval) % 360f;
-            var angles = new QAngle(s.Angles[0], s.RuntimeYaw, s.Angles[2]);
-            var origin = ToVector(s.Origin);
-
             if (IsPropAlive(s.Id, out var prop))
             {
-                try { prop!.Teleport(origin, angles, new Vector(0f, 0f, 0f)); } catch { }
-            }
-            if (IsTextAlive(s.Id, out var text))
-            {
-                var textPos = new Vector(origin.X, origin.Y, origin.Z + 20f);
-                try { text!.Teleport(textPos, angles, new Vector(0f, 0f, 0f)); } catch { }
+                try { prop!.Teleport(ToVector(s.Origin), new QAngle(s.Angles[0], s.RuntimeYaw, s.Angles[2]), new Vector(0f, 0f, 0f)); } catch { }
             }
         }
 
@@ -388,9 +502,8 @@ public class SpawnerManager
     }
 
     /// <summary>
-    /// Spawner alanina giren oyuncunun SADECE o slottaki (tufekse tufek, tabancaysa tabanca)
-    /// eski silahini siler ve yeni silahi verir. Tabanca, bicak, c4 vb. kesinlikle silinmez.
-    /// Oyuncu zaten o silaha sahipse hicbir islem yapmaz (yerde silah birikmez).
+    /// Spawner alanina giren oyuncuya yeni silahi verir; ayar aktifse yalnizca hedef slottaki eski silahi temizler.
+    /// WeaponSkins mevcutsa SelectWeapon oncesinde oyuncunun skin/sticker/keychain bilgilerini anlik uygular.
     /// </summary>
     private void GiveWeapon(IPlayer player, SpawnerData s)
     {
@@ -401,7 +514,8 @@ public class SpawnerManager
         var itemServices = pawn.ItemServices;
         if (weaponServices == null || itemServices == null) return;
 
-        var targetSlot = WeaponCatalog.GetSlot(s.Weapon);
+        var targetSlot = ResolveTargetSlot(s.Weapon);
+        var targetDefIndex = TryGetDefinitionIndex(s.Weapon);
 
         // 1) Oyuncu zaten bu silaha sahip mi? Sahipse hicbir islem yapma (yerde silah birikmesini onler)
         bool alreadyHasThisWeapon = false;
@@ -409,7 +523,9 @@ public class SpawnerManager
         {
             foreach (var w in weaponServices.MyValidWeapons)
             {
-                if (w != null && w.IsValid && string.Equals(w.DesignerName, s.Weapon, StringComparison.OrdinalIgnoreCase))
+                if (w == null || !w.IsValid) continue;
+                if (string.Equals(w.DesignerName, s.Weapon, StringComparison.OrdinalIgnoreCase) ||
+                    (targetDefIndex > 0 && w.AttributeManager.Item.ItemDefinitionIndex == targetDefIndex))
                 {
                     alreadyHasThisWeapon = true;
                     break;
@@ -423,40 +539,40 @@ public class SpawnerManager
             return;
         }
 
-        // 2) SADECE yeni silahin gelecegi slottaki eski silahi bul ve aninda yok et (diger slotlara ASLA dokunma!)
-        var weaponsToRemove = new List<CBasePlayerWeapon>();
-        try
+        // 2) ClearTargetSlot aciksa SADECE yeni silahin girecegi slottaki eski silahi yok et
+        if (_config.ClearTargetSlot && targetSlot != gear_slot_t.GEAR_SLOT_INVALID)
         {
-            foreach (var w in weaponServices.MyValidWeapons.ToList())
-            {
-                if (w == null || !w.IsValid) continue;
-                if (IsProtected(w)) continue;
-
-                // SADECE hedef slottaki silahi sil (tufek veriliyorsa sadece tufek, tabanca veriliyorsa sadece tabanca)
-                if (GetSlot(w) == targetSlot)
-                {
-                    weaponsToRemove.Add(w);
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            _core.Logger.LogDebug($"[WeaponSpawner] Slot taranamadi: {ex.Message}");
-        }
-
-        // Eski silahlari yere dusurmeden dogrudan yok et
-        foreach (var w in weaponsToRemove)
-        {
+            var weaponsToRemove = new List<CBasePlayerWeapon>();
             try
             {
-                w.AcceptInput("Kill", "", null, null, 0);
-                weaponServices.RemoveWeapon(w);
-                w.Despawn();
+                foreach (var w in weaponServices.MyValidWeapons.ToList())
+                {
+                    if (w == null || !w.IsValid) continue;
+                    if (IsProtected(w)) continue;
+
+                    if (GetSlot(w) == targetSlot)
+                    {
+                        weaponsToRemove.Add(w);
+                    }
+                }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                _core.Logger.LogWarning($"[WeaponSpawner] Hedef slot taranamadi: {ex.Message}");
+            }
+
+            foreach (var w in weaponsToRemove)
+            {
+                try
+                {
+                    weaponServices.RemoveWeapon(w);
+                    if (w.IsValid) w.Despawn();
+                }
+                catch { }
+            }
         }
 
-        // 3) Bir sonraki tick'te yeni silahi ver ve ele sec
+        // 3) Bir sonraki tick'te yeni silahi ver, SelectWeapon oncesinde skin uygula ve sec
         var slot = player.Slot;
         var weaponName = s.Weapon;
         _core.Scheduler.NextTick(() =>
@@ -469,16 +585,51 @@ public class SpawnerManager
             try
             {
                 var given = pp.ItemServices.GiveItem<CBasePlayerWeapon>(weaponName);
-                if (given != null && given.IsValid && pp.WeaponServices != null)
+                if (given != null && given.IsValid)
                 {
-                    pp.WeaponServices.SelectWeapon(given);
+                    // Istemci silahi eline aldigi ilk anda skinli gorebilsin diye SelectWeapon oncesinde boya.
+                    _skinIntegration?.ApplySkinToWeapon(p, given);
+
+                    pp.WeaponServices?.SelectWeapon(given);
+
+                    if (_config.NotifyOnPickup)
+                    {
+                        p.SendChat($"{_config.ChatPrefix} [lime]{Pretty(weaponName)}[default] verildi.");
+                    }
                 }
             }
             catch (Exception ex)
             {
-                _core.Logger.LogError($"[WeaponSpawner] {weaponName} verilemedi: {ex.Message}");
+                _core.Logger.LogError(ex, $"[WeaponSpawner] {weaponName} verilemedi: {ex.Message}");
             }
         });
+    }
+
+    private gear_slot_t ResolveTargetSlot(string weapon)
+    {
+        var slot = WeaponCatalog.GetSlot(weapon);
+        if (slot != gear_slot_t.GEAR_SLOT_INVALID) return slot;
+
+        try
+        {
+            var vdata = _core.Helpers.GetWeaponCSDataFromKey(-1, weapon);
+            if (vdata != null) return vdata.GearSlot;
+        }
+        catch { }
+
+        return gear_slot_t.GEAR_SLOT_INVALID;
+    }
+
+    private ushort TryGetDefinitionIndex(string weapon)
+    {
+        try
+        {
+            return (ushort)(_core.Helpers.GetDefinitionIndexByClassname(weapon) ?? 0);
+        }
+        catch
+        {
+            return 0;
+        }
     }
 
     private bool IsProtected(CBasePlayerWeapon weapon)
@@ -523,26 +674,21 @@ public class SpawnerManager
     public bool IsPropAlive(int id, out CBaseModelEntity? prop)
     {
         prop = null;
-        if (_props.TryGetValue(id, out var handle) && handle.IsValid && handle.Value is { } p && p.IsValid)
+        if (!_props.TryGetValue(id, out var handle)) return false;
+        try
         {
-            prop = p;
-            return true;
+            if (handle.IsValid && handle.Value is { } p && p.IsValid)
+            {
+                prop = p;
+                return true;
+            }
         }
+        catch { }
+
         return false;
     }
 
-    public bool IsTextAlive(int id, out CPointWorldText? text)
-    {
-        text = null;
-        if (_texts.TryGetValue(id, out var handle) && handle.IsValid && handle.Value is { } t && t.IsValid)
-        {
-            text = t;
-            return true;
-        }
-        return false;
-    }
-
-    public bool IsSpawned(int id) => IsPropAlive(id, out _) || IsTextAlive(id, out _);
+    public bool IsSpawned(int id) => IsPropAlive(id, out _);
 
     public static string Pretty(string weapon) =>
         weapon.StartsWith("weapon_") ? weapon["weapon_".Length..].ToUpperInvariant() : weapon.ToUpperInvariant();

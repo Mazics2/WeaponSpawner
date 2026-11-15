@@ -14,6 +14,11 @@
   <ItemGroup>
     <!-- SwiftlyS2, sunucu tarafinda calisma zamaninda saglanir -->
     <PackageReference Include="SwiftlyS2.CS2" Version="1.5.0" ExcludeAssets="runtime" PrivateAssets="all" />
+    <!-- Opsiyonel yumusak bagimlilik: WeaponSkins.Shared sunucuda WeaponSkins/resources/exports altindan yuklenir -->
+    <ProjectReference Include="..\WeaponSkins\WeaponSkins.Shared\WeaponSkins.Shared.csproj">
+      <Private>false</Private>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </ProjectReference>
   </ItemGroup>
 
 </Project>
