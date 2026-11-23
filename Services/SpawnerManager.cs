@@ -317,20 +317,24 @@ public class SpawnerManager
     public void OnTick()
     {
         _tick++;
-        if (_store.Spawners.Count == 0) return;
+        var spawners = _store.Spawners;
+        int spawnerCount = spawners.Count;
+        if (spawnerCount == 0) return;
 
         // Haritada silinmis veya temizlenmis entity'leri kontrol et (her 4 saniyede bir)
         if (_tick % 256 == 0)
         {
-            foreach (var s in _store.Spawners)
+            for (int i = 0; i < spawnerCount; i++)
             {
+                var s = spawners[i];
                 if (!IsSpawned(s.Id)) Spawn(s);
             }
         }
 
         // Donen spawner'lar
-        foreach (var s in _store.Spawners)
+        for (int i = 0; i < spawnerCount; i++)
         {
+            var s = spawners[i];
             if (MathF.Abs(s.SpinSpeed) < 0.01f) continue;
             s.RuntimeYaw = (s.RuntimeYaw + s.SpinSpeed * TickInterval) % 360f;
             var angles = new QAngle(s.Angles[0], s.RuntimeYaw, s.Angles[2]);
@@ -359,8 +363,9 @@ public class SpawnerManager
 
             var feet = pawn.AbsOrigin.Value;
 
-            foreach (var s in _store.Spawners)
+            for (int i = 0; i < spawnerCount; i++)
             {
+                var s = spawners[i];
                 if (!_inside.TryGetValue(s.Id, out var set))
                 {
                     set = new HashSet<int>();
@@ -462,9 +467,8 @@ public class SpawnerManager
         {
             try
             {
-                w.AcceptInput("Kill", "", null, null, 0);
                 weaponServices.RemoveWeapon(w);
-                w.Despawn();
+                w.AcceptInput("Kill", "", null, null, 0);
             }
             catch { }
         }
@@ -508,23 +512,28 @@ public class SpawnerManager
                         catch { }
 
                         // WeaponSkins calistiginda eski silahi yere atar (RemoveWeapon) ve yeni skinli silah verir.
-                        // Yere dusen eski kopyayi (given) yok ediyoruz.
+                        // Yere dusen eski kopyayi (given) yok ediyoruz (Kill + Despawn birlikte cagrilmaz).
+                        bool cleaned = false;
                         void CheckAndDestroyDropped()
                         {
+                            if (cleaned) return;
                             try
                             {
-                                if (givenHandle.IsValid && givenHandle.Value is { } dropped && dropped.IsValid)
+                                if (!givenHandle.IsValid || givenHandle.Value is not { } dropped || !dropped.IsValid)
                                 {
-                                    var curP = _core.PlayerManager.GetPlayer(slot);
-                                    var curWeapons = curP?.PlayerPawn?.WeaponServices?.MyValidWeapons;
-                                    bool stillHeld = curWeapons != null && curWeapons.Any(w => w != null && w.IsValid && w.Address == givenAddr);
+                                    cleaned = true;
+                                    return;
+                                }
 
-                                    // Eger bu ilk silah artik oyuncunun elinde/envanterinde degilse (yere dusmusse), yok et:
-                                    if (!stillHeld)
-                                    {
-                                        dropped.AcceptInput("Kill", "", null, null, 0);
-                                        dropped.Despawn();
-                                    }
+                                var curP = _core.PlayerManager.GetPlayer(slot);
+                                var curWeapons = curP?.PlayerPawn?.WeaponServices?.MyValidWeapons;
+                                bool stillHeld = curWeapons != null && curWeapons.Any(w => w != null && w.IsValid && w.Address == givenAddr);
+
+                                // Eger bu ilk silah artik oyuncunun elinde/envanterinde degilse (yere dusmusse), guvenli sekilde yok et:
+                                if (!stillHeld)
+                                {
+                                    cleaned = true;
+                                    dropped.AcceptInput("Kill", "", null, null, 0);
                                 }
                             }
                             catch { }
