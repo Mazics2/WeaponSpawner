@@ -426,20 +426,24 @@ public class SpawnerManager
     public void OnTick()
     {
         _tick++;
-        if (_store.Spawners.Count == 0) return;
+        var spawners = _store.Spawners;
+        int spawnerCount = spawners.Count;
+        if (spawnerCount == 0) return;
 
         // Haritada silinmis veya temizlenmis prop'lari saniyede bir kontrol et ve yeniden olustur
         if (_tick % 64 == 0)
         {
-            foreach (var s in _store.Spawners)
+            for (int i = 0; i < spawnerCount; i++)
             {
+                var s = spawners[i];
                 if (!IsPropAlive(s.Id, out _)) Spawn(s);
             }
         }
 
         // Donen spawner'lar
-        foreach (var s in _store.Spawners)
+        for (int i = 0; i < spawnerCount; i++)
         {
+            var s = spawners[i];
             if (MathF.Abs(s.SpinSpeed) < 0.01f) continue;
             s.RuntimeYaw = (s.RuntimeYaw + s.SpinSpeed * TickInterval) % 360f;
             if (IsPropAlive(s.Id, out var prop))
@@ -460,8 +464,9 @@ public class SpawnerManager
 
             var feet = pawn.AbsOrigin.Value;
 
-            foreach (var s in _store.Spawners)
+            for (int i = 0; i < spawnerCount; i++)
             {
+                var s = spawners[i];
                 if (!_inside.TryGetValue(s.Id, out var set))
                 {
                     set = new HashSet<int>();
